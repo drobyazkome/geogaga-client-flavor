@@ -40,7 +40,8 @@ CANARIES = {
     "GEOGAGA-BLOCK": ["doubleclick.net"],
 }
 
-MAX_SHRINK = 0.20  # падение размера больше 20% против прошлого прогона — стоп
+MAX_SHRINK = 0.20   # падение размера больше 20% против прошлого прогона — стоп
+MAX_CONFLICTS = 40  # доменов сразу в двух категориях; на 23.08 у апстрима 17
 
 
 def read_varint(buf, pos):
@@ -124,14 +125,21 @@ def check(kind, path, state, failures):
                 failures.append(f"geosite: в {name} нет контрольных доменов: {', '.join(missing)}")
 
         # Сборщик geogaga категории между собой НЕ дедуплицирует: домен из двух
-        # источников с разным dst попадёт в обе категории, и дальше всё решит
-        # порядок правил в шаблоне. На 23.08 пересечений ноль — ловим регресс.
+        # источников с разным dst попадает в обе категории, и дальше всё решает
+        # порядок правил в шаблоне. На 23.08 таких 17 — это состояние апстрима
+        # (реклама из category-ads runetfreedom против whitelist roscomvpn),
+        # валить на нём сборку нельзя. Порог ловит регресс масштаба категории.
         direct = cats.get("GEOGAGA-DIRECT", (0, set()))[1] or set()
+        total_conflicts = 0
         for other in ("GEOGAGA-PROXY", "GEOGAGA-BLOCK"):
             overlap = direct & (cats.get(other, (0, set()))[1] or set())
+            total_conflicts += len(overlap)
             if overlap:
-                sample = ", ".join(sorted(overlap)[:8])
-                failures.append(f"geosite: {len(overlap)} доменов сразу в DIRECT и {other}: {sample}")
+                print(f"  внимание: {len(overlap)} доменов сразу в DIRECT и {other}: "
+                      f"{', '.join(sorted(overlap)[:8])}", file=sys.stderr)
+        if total_conflicts > MAX_CONFLICTS:
+            failures.append(f"geosite: конфликтов категорий {total_conflicts}, "
+                            f"порог {MAX_CONFLICTS} — источник поехал")
 
     previous = state.get(kind, {}).get("size")
     if previous and size < previous * (1 - MAX_SHRINK):
