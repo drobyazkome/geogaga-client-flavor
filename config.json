@@ -107,6 +107,17 @@
           "dst": "GEOGAGA-DIRECT"
         }
       ]
+    },
+    {
+      "url": "https://github.com/hydraponique/roscomvpn-geosite/raw/release/geosite.dat",
+      "rules": [
+        {
+          "src": [
+            "*"
+          ],
+          "dst": "*"
+        }
+      ]
     }
   ],
   "geoip": [
@@ -270,6 +281,17 @@
             "*"
           ],
           "dst": "GEOGAGA-PROXY"
+        }
+      ]
+    },
+    {
+      "url": "https://github.com/hydraponique/roscomvpn-geoip/raw/release/geoip.dat",
+      "rules": [
+        {
+          "src": [
+            "*"
+          ],
+          "dst": "*"
         }
       ]
     }
