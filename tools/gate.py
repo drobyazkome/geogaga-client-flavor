@@ -41,7 +41,14 @@ CANARIES = {
 }
 
 MAX_SHRINK = 0.20   # падение размера больше 20% против прошлого прогона — стоп
-MAX_CONFLICTS = 40  # доменов сразу в двух категориях; на 23.08 у апстрима 17
+# Конфликты категорий разведены: они значат разное.
+# DIRECT∩PROXY — противоречие маршрутизации, исход решает порядок правил;
+#   таких быть почти не должно, порог жёсткий.
+# DIRECT∩BLOCK — реклама и трекеры, попавшие в российские категории
+#   (adfox.ru, webvisor.com и подобные). Блок-правило в шаблоне идёт первым,
+#   поэтому исход правильный; порог мягкий, ловит только обвал масштаба категории.
+MAX_CONFLICTS_PROXY = 25
+MAX_CONFLICTS_BLOCK = 400
 
 
 def read_varint(buf, pos):
@@ -141,16 +148,15 @@ def check(kind, path, state, failures):
         # (реклама из category-ads runetfreedom против whitelist roscomvpn),
         # валить на нём сборку нельзя. Порог ловит регресс масштаба категории.
         direct = cats.get("GEOGAGA-DIRECT", (0, set()))[1] or set()
-        total_conflicts = 0
-        for other in ("GEOGAGA-PROXY", "GEOGAGA-BLOCK"):
+        for other, limit in (("GEOGAGA-PROXY", MAX_CONFLICTS_PROXY),
+                             ("GEOGAGA-BLOCK", MAX_CONFLICTS_BLOCK)):
             overlap = direct & (cats.get(other, (0, set()))[1] or set())
-            total_conflicts += len(overlap)
             if overlap:
                 print(f"  внимание: {len(overlap)} доменов сразу в DIRECT и {other}: "
                       f"{', '.join(sorted(overlap)[:8])}", file=sys.stderr)
-        if total_conflicts > MAX_CONFLICTS:
-            failures.append(f"geosite: конфликтов категорий {total_conflicts}, "
-                            f"порог {MAX_CONFLICTS} — источник поехал")
+            if len(overlap) > limit:
+                failures.append(f"geosite: {len(overlap)} доменов сразу в DIRECT и {other}, "
+                                f"порог {limit} — источник поехал")
 
     previous = state.get(kind, {}).get("size")
     if previous and size < previous * (1 - MAX_SHRINK):
