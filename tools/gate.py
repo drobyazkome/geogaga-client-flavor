@@ -96,6 +96,17 @@ def parse_categories(blob, want_values):
     return result
 
 
+def covered(domain, values):
+    """Домен есть в категории сам или покрыт родителем.
+
+    Сборщик geogaga схлопывает `full:app.avito.ru`, если в той же категории
+    уже лежит `domain:avito.ru` — покрытие сохраняется, запись исчезает.
+    Проверять точным совпадением значит ловить оптимизацию как поломку.
+    """
+    parts = domain.split(".")
+    return any(".".join(parts[i:]) in values for i in range(len(parts)))
+
+
 def check(kind, path, state, failures):
     if not os.path.exists(path):
         failures.append(f"{kind}: файла нет — {path}")
@@ -120,7 +131,7 @@ def check(kind, path, state, failures):
     if kind == "geosite":
         for name, domains in CANARIES.items():
             values = cats.get(name, (0, set()))[1] or set()
-            missing = [d for d in domains if d not in values]
+            missing = [d for d in domains if not covered(d, values)]
             if missing:
                 failures.append(f"geosite: в {name} нет контрольных доменов: {', '.join(missing)}")
 
