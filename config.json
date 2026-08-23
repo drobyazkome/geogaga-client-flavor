@@ -60,6 +60,25 @@
             "ru-available-only-inside"
           ],
           "dst": "GEOGAGA-DIRECT"
+        },
+        {
+          "src": [
+            "category-ru",
+            "category-bank-ru",
+            "category-ecommerce-ru",
+            "category-retail-ru",
+            "category-medicine-ru",
+            "category-travel-ru",
+            "category-education-ru",
+            "category-gov-ru",
+            "category-forums-ru",
+            "category-media-ru",
+            "category-tech-media-ru",
+            "category-entertainment-ru",
+            "category-ai-ru",
+            "category-betting-ru"
+          ],
+          "dst": "GEOGAGA-DIRECT"
         }
       ]
     },
@@ -134,6 +153,12 @@
         {
           "src": [
             "ru-whitelist"
+          ],
+          "dst": "GEOGAGA-DIRECT"
+        },
+        {
+          "src": [
+            "ru"
           ],
           "dst": "GEOGAGA-DIRECT"
         }
