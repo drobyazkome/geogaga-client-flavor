@@ -39,6 +39,9 @@ jobs:
           sha256sum geosite.dat > geosite.dat.sha256
           sha256sum geoip.dat > geoip.dat.sha256
 
+      - name: Гейт качества geo-баз
+        run: python tools/gate.py --geosite geosite.dat --geoip geoip.dat
+
       - name: Генерация конфигураций маршрутизации и ссылок
         shell: bash
         run: |
