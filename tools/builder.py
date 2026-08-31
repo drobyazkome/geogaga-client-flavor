@@ -392,7 +392,7 @@ def download_and_parse(source, list_class):
         log_to_review(f"[ОШИБКА ЗАГРУЗКИ] {msg}")
         return source, None
 
-def process_dat(config, list_class, attr_name):
+def process_dat(config, list_class, attr_name, exclusions=None):
     category_items = collections.defaultdict(list)
     
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -486,10 +486,21 @@ def process_dat(config, list_class, attr_name):
                             check_and_log_duplicates(items, url, attr_name, upstream_keys_map)
                     
     out_list = list_class()
+    exclusions = {k.upper(): {v.lower() for v in vals} for k, vals in (exclusions or {}).items()}
     for cat, items in category_items.items():
         entry = out_list.entry.add()
         entry.country_code = cat.upper() 
         target_list = getattr(entry, attr_name)
+
+        # Список исключений: домен, пришедший из апстрим-источника, не должен
+        # попасть в категорию. Нужен там, где чужой блок-лист метит рабочий
+        # эндпоинт как трекер (graph.instagram.com в category-ads).
+        excluded = exclusions.get(cat.upper())
+        if excluded and attr_name == "domain":
+            before = len(items)
+            items = [i for i in items if i.value.lower() not in excluded]
+            if before != len(items):
+                print(f"[СБОРЩИК] Исключено {before - len(items)} правил из категории {cat.upper()}")
         
         if cat.upper().startswith("GEOGAGA-"):
             optimized_items = optimize_domains(items) if attr_name == "domain" else optimize_ips(items)
@@ -517,7 +528,8 @@ if __name__ == "__main__":
         config = json.load(f)
 
     if 'geosite' in config:
-        geosite = process_dat(config['geosite'], router_pb2.GeoSiteList, "domain")
+        geosite = process_dat(config['geosite'], router_pb2.GeoSiteList, "domain",
+                              config.get('exclusions'))
         with open("geosite.dat", "wb") as f: 
             f.write(geosite.SerializeToString())
         print("[УСПЕХ] Файл geosite.dat успешно сгенерирован.")
