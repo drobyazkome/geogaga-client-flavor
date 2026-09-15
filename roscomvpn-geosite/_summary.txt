@@ -1,0 +1,34 @@
+=== СВОДКА: roscomvpn-geosite ===
+Всего категорий: 23
+Всего элементов: 3107
+
+Всего элементов по типам данных:
+  domain: 2984
+  keyword: 105
+  regex: 7
+  full: 11
+
+Детализация по категориям:
+- APPLE: 92 элементов (domain: 92)
+- CATEGORY-ADS: 2 элементов (domain: 2)
+- CATEGORY-GEOBLOCK-RU: 880 элементов (domain: 770, keyword: 105, regex: 5)
+- CATEGORY-RU: 55 элементов (domain: 55)
+- EPICGAMES: 27 элементов (domain: 27)
+- ESCAPEFROMTARKOV: 4 элементов (domain: 4)
+- FACEIT: 2 элементов (domain: 2)
+- GITHUB: 28 элементов (domain: 27, regex: 1)
+- GOOGLE-DEEPMIND: 41 элементов (domain: 41)
+- GOOGLE-PLAY: 29 элементов (domain: 29)
+- MICROSOFT: 66 элементов (domain: 66)
+- ORIGIN: 153 элементов (domain: 153)
+- PINTEREST: 50 элементов (domain: 50)
+- PRIVATE: 130 элементов (domain: 118, full: 11, regex: 1)
+- RIOT: 54 элементов (domain: 54)
+- STEAM: 40 элементов (domain: 40)
+- TELEGRAM: 26 элементов (domain: 26)
+- TORRENT: 418 элементов (domain: 418)
+- TWITCH: 40 элементов (domain: 40)
+- TWITCH-ADS: 5 элементов (domain: 5)
+- WHITELIST: 465 элементов (domain: 465)
+- WIN-SPY: 323 элементов (domain: 323)
+- YOUTUBE: 177 элементов (domain: 177)
