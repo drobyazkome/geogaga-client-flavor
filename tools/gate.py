@@ -40,6 +40,18 @@ CANARIES = {
     "GEOGAGA-BLOCK": ["doubleclick.net"],
 }
 
+# Хвост roscomvpn (passthrough `*`→`*`): шаблоны подписки ссылаются на эти
+# категории явно, без них правило в клиенте мёртвое. Верхняя граница ловит
+# обвал passthrough: слияние с апстримом 21.09.2026 складывало все 22
+# категории хвоста в одну (YOUTUBE стал 3056 вместо 177) — гейт по одним
+# GEOGAGA-* и минимумам этого не заметил. Факт на 21.09: RIOT 54, EPICGAMES 27,
+# YOUTUBE 177, TELEGRAM 26, GITHUB 28, GOOGLE-PLAY 29, TWITCH-ADS 5, TORRENT 418.
+TAIL_ENTRIES = {
+    "RIOT": (40, 300), "EPICGAMES": (20, 150), "YOUTUBE": (120, 900),
+    "TELEGRAM": (20, 150), "GITHUB": (20, 150), "GOOGLE-PLAY": (20, 150),
+    "TWITCH-ADS": (3, 40), "TORRENT": (300, 2000),
+}
+
 MAX_SHRINK = 0.20   # падение размера больше 20% против прошлого прогона — стоп
 # Конфликты категорий разведены: они значат разное.
 # DIRECT∩PROXY — противоречие маршрутизации, исход решает порядок правил;
@@ -136,6 +148,14 @@ def check(kind, path, state, failures):
             failures.append(f"{kind}: {name} — {count} записей, порог {minimum}")
 
     if kind == "geosite":
+        for name, (low, high) in TAIL_ENTRIES.items():
+            count = cats.get(name, (0, None))[0]
+            if count < low:
+                failures.append(f"geosite: хвост {name} — {count} записей, порог {low}")
+            elif count > high:
+                failures.append(f"geosite: хвост {name} — {count} записей, больше {high}: "
+                                "passthrough свалил категории в одну")
+
         for name, domains in CANARIES.items():
             values = cats.get(name, (0, set()))[1] or set()
             missing = [d for d in domains if not covered(d, values)]

@@ -42,6 +42,11 @@ jobs:
       - name: Гейт качества geo-баз
         run: python tools/gate.py --geosite geosite.dat --geoip geoip.dat
 
+      - name: Подготовка файлов маршрутизации
+        run: |
+          mkdir -p routing
+          cp happ.json incy.json routing/ || true
+
       - name: Генерация конфигураций маршрутизации и ссылок
         shell: bash
         run: |
@@ -76,7 +81,7 @@ jobs:
           echo "[$(date -u +'%Y-%m-%d %H:%M:%S')] ОШИБКА: Сбой выполнения шагов сборки в GitHub Actions" >> review.log
 
       - name: Коммит и пуш лога в ветку main
-        if: always()
+        if: github.ref_name == 'main'
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -100,14 +105,18 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
           mkdir -p result
-          mv geosite.dat geosite.dat.sha256 geoip.dat geoip.dat.sha256 routing result/ || true
+          # Удаляем старую папку routing, чтобы избежать ошибки "Directory not empty"
+          rm -rf result/routing
+          cp -r routing result/
+          mv geosite.dat geosite.dat.sha256 geoip.dat geoip.dat.sha256 result/ || true
           
           git add result/
+          [ -f tools/review.log ] && git add tools/review.log || true
           git commit -m "chore: update test results [skip ci]" || echo "No changes to commit"
           git push origin test
 
       - name: Коммит в ветку release
-        if: github.ref_name != 'test'
+        if: github.ref_name == 'main'
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -123,18 +132,18 @@ jobs:
           git push origin tmp-release:release --force
 
       - name: Удаление старого тега/релиза latest
-        if: github.ref_name != 'test'
+        if: github.ref_name == 'main'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release delete latest --cleanup-tag -y || true
 
       - name: Получение даты
-        if: github.ref_name != 'test'
+        if: github.ref_name == 'main'
         id: date
         run: echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
 
       - name: Создание нового релиза
-        if: github.ref_name != 'test'
+        if: github.ref_name == 'main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
