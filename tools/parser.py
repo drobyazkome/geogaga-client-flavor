@@ -9,7 +9,8 @@ import router_pb2
 from common import (
     parse_json_source_geoip, parse_json_source_geosite,
     parse_lst_source_geoip, parse_lst_source_geosite,
-    get_item_key, fetch_asn
+    get_item_key, fetch_asn,
+    FAILURES, fail, to_cidr_proto
 )
 
 OUTPUT_DIR = "parser-tmp"
@@ -22,7 +23,7 @@ def download_file(url, dest):
                 f.write(resp.read())
         return dest
     except Exception as e:
-        print(f"❌ Ошибка скачивания {url}: {e}")
+        fail(f"не скачан {url}: {e}")
         return None
 
 def get_repo_name(url):
@@ -44,7 +45,7 @@ def download_data(url):
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.read()
     except Exception as e:
-        print(f"❌ Ошибка загрузки {url}: {e}")
+        fail(f"не загружен {url}: {e}")
         return None
 
 def write_lst_file(folder, category, items, is_geoip):
@@ -81,7 +82,7 @@ def process_dat(data_bytes, is_geoip, target_folder):
             parsed = router_pb2.GeoSiteList.FromString(data_bytes)
             attr = 'domain'
     except Exception as e:
-        print(f"❌ Ошибка распаковки protobuf: {e}")
+        fail(f"protobuf не распакован ({target_folder}): {e}")
         return
 
     for entry in parsed.entry:
@@ -98,15 +99,10 @@ def process_json_geoip(data, target_folder):
         items = []
         cidrs = info.get("cidrs", []) or info.get("ips", []) or []
         for c in cidrs:
-            if isinstance(c, str) and '/' in c:
-                try:
-                    net = ipaddress.ip_network(c.strip(), strict=False)
-                    cidr_proto = router_pb2.CIDR()
-                    cidr_proto.ip = net.network_address.packed
-                    cidr_proto.prefix = net.prefixlen
-                    items.append(cidr_proto)
-                except Exception:
-                    continue
+            # одиночный адрес — /32 или /128, как в сборщике (common.to_cidr_proto)
+            cidr_proto = to_cidr_proto(c) if isinstance(c, str) else None
+            if cidr_proto is not None:
+                items.append(cidr_proto)
 
         asns = info.get("asns", []) or []
         for asn in asns:
@@ -188,7 +184,7 @@ def process_source(source, is_geoip):
         try:
             data = json.loads(data_bytes.decode('utf-8'))
         except Exception as e:
-            print(f"❌ Ошибка парсинга JSON {url}: {e}")
+            fail(f"JSON не разобран {url}: {e}")
             return
 
         if is_geoip:
@@ -236,13 +232,17 @@ def process_geogaga_dat():
     geoip_path = None
 
     if branch == 'main':
-        print("🔍 Ветка main: скачиваем geodata из release...")
+        # Свой релиз, а не апстрима: до 25.09 здесь стоял адрес
+        # bratishkadrugoimamysynishka, и каталоги geogaga-client-flavor-* в ветке
+        # lists были списками чужой базы (ревью Codex).
+        repo = os.environ.get('GITHUB_REPOSITORY', 'drobyazkome/geogaga-client-flavor')
+        print(f"🔍 Ветка main: скачиваем geodata из release {repo}...")
         geosite_path = download_file(
-            'https://raw.githubusercontent.com/bratishkadrugoimamysynishka/geogaga-client-flavor/release/geosite.dat',
+            f'https://raw.githubusercontent.com/{repo}/release/geosite.dat',
             'geosite_release.dat'
         )
         geoip_path = download_file(
-            'https://raw.githubusercontent.com/bratishkadrugoimamysynishka/geogaga-client-flavor/release/geoip.dat',
+            f'https://raw.githubusercontent.com/{repo}/release/geoip.dat',
             'geoip_release.dat'
         )
     elif branch == 'test':
@@ -262,13 +262,13 @@ def process_geogaga_dat():
         print("🔄 Обработка geogaga geosite.dat...")
         parse_geogaga_dat(geosite_path, is_geoip=False)
     else:
-        print("⚠️ geosite.dat не найден, пропускаем.")
+        fail("geosite.dat нашей сборки не найден")
 
     if geoip_path:
         print("🔄 Обработка geogaga geoip.dat...")
         parse_geogaga_dat(geoip_path, is_geoip=True)
     else:
-        print("⚠️ geoip.dat не найден, пропускаем.")
+        fail("geoip.dat нашей сборки не найден")
 
 def main():
     if os.path.exists(OUTPUT_DIR):
@@ -284,17 +284,26 @@ def main():
     with open(config_path, 'r') as f:
         config = json.load(f)
 
+    # Результаты map читаются через list(): иначе исключение потока никто не
+    # поднимал, и парсер выходил с кодом 0 при неполных списках, а деплой
+    # с clean: true стирал прежние списки пропавшего источника (ревью Codex 25.09).
     if 'geosite' in config:
         print("=== Обработка geosite ===")
         with ThreadPoolExecutor(max_workers=4) as executor:
-            executor.map(lambda src: process_source(src, False), config['geosite'])
+            list(executor.map(lambda src: process_source(src, False), config['geosite']))
 
     if 'geoip' in config:
         print("=== Обработка geoip ===")
         with ThreadPoolExecutor(max_workers=4) as executor:
-            executor.map(lambda src: process_source(src, True), config['geoip'])
+            list(executor.map(lambda src: process_source(src, True), config['geoip']))
 
     process_geogaga_dat()
+
+    if FAILURES:
+        print(f"\nПАРСИНГ НЕ ПРОЙДЕН — отказов: {len(FAILURES)}, деплой списков не нужен:")
+        for msg in FAILURES:
+            print(f"  ✗ {msg}")
+        sys.exit(1)
 
     print("✅ Все задачи парсинга завершены.")
 

@@ -12,15 +12,26 @@ from common import (
     parse_lst_source_geoip, parse_lst_source_geosite,
     optimize_domains, optimize_ips,
     filter_and_log_geoip_items,
-    parse_exclude_list, check_exclusions
+    parse_exclude_list, check_exclusions,
+    FAILURES, fail
 )
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def download_and_parse(source, list_class):
     print(f"Загрузка: {source['url']}")
     try:
-        req = urllib.request.Request(source['url'], headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = response.read()
+        if source['url'].startswith(("http://", "https://")):
+            req = urllib.request.Request(source['url'], headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = response.read()
+        else:
+            # Путь без схемы — файл из checkout собираемой ревизии. Так берутся
+            # наши custom-additions: до 25.09 они шли HTTP-запросом в raw/main,
+            # и сборка ветки или повтор старого запуска получали чужую ревизию,
+            # а закрытый репозиторий — 404 и молча пустые добавки (ревью Codex).
+            with open(os.path.join(ROOT, source['url']), 'rb') as f:
+                data = f.read()
 
         url_lower = source['url'].lower()
         if url_lower.endswith('.json'):
@@ -31,10 +42,16 @@ def download_and_parse(source, list_class):
             parsed_list = list_class.FromString(data)
             return source, parsed_list
     except Exception as e:
-        msg = f"Ошибка загрузки или обработки источника {source['url']}: {e}"
-        print(f"❌ {msg}")
-        log_to_review(f"[ОШИБКА ЗАГРУЗКИ] {msg}")
+        fail(f"источник {source['url']} не загружен или не разобран: {e}")
         return source, None
+
+def require_categories(url, rule, available):
+    """Каждая категория из src правила должна быть в источнике. Пропавшая
+    категория раньше давала просто меньше записей, и сборка проходила."""
+    wanted = {c.upper() for c in rule['src']} - {"*"}
+    missing = sorted(wanted - available)
+    if missing:
+        fail(f"{url}: нет категорий {', '.join(missing)} (правило → {rule['dst']})")
 
 def process_dat(config, list_class, attr_name, exclusions=None):
     category_items = collections.defaultdict(list)
@@ -83,6 +100,18 @@ def process_dat(config, list_class, attr_name, exclusions=None):
         url = source['url']
         url_lower = url.lower()
         is_custom = "custom-additions" in url
+
+        # Пустой .dat или JSON — отказ источника, а не «ноль записей». LST
+        # не проверяется: наши custom-additions бывают пустыми намеренно.
+        if not url_lower.endswith(('.lst', '.txt')):
+            available = ({e.country_code.upper() for e in parsed_data.entry}
+                         if not url_lower.endswith('.json')
+                         else {k.upper() for k in parsed_data})
+            if not available:
+                fail(f"{url}: источник пуст — ни одной категории")
+                continue
+            for rule in source['rules']:
+                require_categories(url, rule, available)
 
         if url_lower.endswith('.json'):
             if attr_name == "cidr":
@@ -226,17 +255,24 @@ if __name__ == "__main__":
     with open(sys.argv[1], 'r') as f:
         config = json.load(f)
 
+    built = {}
     if 'geosite' in config:
-        geosite = process_dat(config['geosite'], router_pb2.GeoSiteList, "domain",
-                              config.get('exclusions'))
-        with open("geosite.dat", "wb") as f:
-            f.write(geosite.SerializeToString())
-        print("[УСПЕХ] Файл geosite.dat успешно сгенерирован.")
-
+        built["geosite.dat"] = process_dat(config['geosite'], router_pb2.GeoSiteList, "domain",
+                                           config.get('exclusions'))
     if 'geoip' in config:
-        geoip = process_dat(config['geoip'], router_pb2.GeoIPList, "cidr")
-        with open("geoip.dat", "wb") as f:
-            f.write(geoip.SerializeToString())
-        print("[УСПЕХ] Файл geoip.dat успешно сгенерирован.")
+        built["geoip.dat"] = process_dat(config['geoip'], router_pb2.GeoIPList, "cidr")
+
+    # Неполную сборку не пишем вовсе: без файлов следующие шаги workflow
+    # падают, и публикуется прежний релиз, а не база без части источников.
+    if FAILURES:
+        print(f"\nСБОРКА НЕ ПРОЙДЕНА — отказов: {len(FAILURES)}, файлы не записаны:")
+        for msg in FAILURES:
+            print(f"  ✗ {msg}")
+        sys.exit(1)
+
+    for name, data in built.items():
+        with open(name, "wb") as f:
+            f.write(data.SerializeToString())
+        print(f"[УСПЕХ] Файл {name} успешно сгенерирован.")
 
     print("Сборка успешно завершена.")

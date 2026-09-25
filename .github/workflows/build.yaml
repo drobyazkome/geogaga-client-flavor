@@ -8,6 +8,12 @@ on:
 permissions:
   contents: write
 
+# Плановый и ручной запуск не должны публиковать latest вперемешку (ревью Codex
+# 25.09). Идущий запуск не отменяем: оборванная публикация хуже очереди.
+concurrency:
+  group: build-publish
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -39,8 +45,23 @@ jobs:
           sha256sum geosite.dat > geosite.dat.sha256
           sha256sum geoip.dat > geoip.dat.sha256
 
+      # Проверка усадки гейта сравнивает с прошлой сборкой, а раннер каждый раз
+      # чистый: без этого шага .geo-gate-state не было, и усадка между
+      # сборками не проверялась вовсе (ревью Codex 25.09). База — размеры
+      # опубликованной ветки release.
+      - name: Базовая линия гейта — размеры опубликованного релиза
+        run: |
+          if git fetch -q --depth=1 origin release \
+             && gs=$(git cat-file -s FETCH_HEAD:geosite.dat) \
+             && gi=$(git cat-file -s FETCH_HEAD:geoip.dat); then
+            printf '{"geosite": {"size": %s}, "geoip": {"size": %s}}\n' "$gs" "$gi" > "$RUNNER_TEMP/gate-state.json"
+            echo "база: geosite $gs, geoip $gi байт"
+          else
+            echo "::warning::ветка release не прочитана — усадка против прошлой сборки не проверяется"
+          fi
+
       - name: Гейт качества geo-баз
-        run: python tools/gate.py --geosite geosite.dat --geoip geoip.dat
+        run: python tools/gate.py --geosite geosite.dat --geoip geoip.dat --state "$RUNNER_TEMP/gate-state.json"
 
       - name: Подготовка файлов маршрутизации
         run: |
@@ -131,27 +152,20 @@ jobs:
           
           git push origin tmp-release:release --force
 
-      - name: Удаление старого тега/релиза latest
+      # До 25.09 latest сначала удалялся, потом создавался заново: отказ
+      # создания или загрузки оставлял панель без релиза (её апдейтер берёт
+      # releases/latest/download). Теперь файлы заменяются в живом релизе.
+      - name: Публикация релиза latest
         if: github.ref_name == 'main'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release delete latest --cleanup-tag -y || true
-
-      - name: Получение даты
-        if: github.ref_name == 'main'
-        id: date
-        run: echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
-
-      - name: Создание нового релиза
-        if: github.ref_name == 'main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: ${{ steps.date.outputs.date }}
-          files: |
-            geosite.dat
-            geosite.dat.sha256
-            geoip.dat
-            geoip.dat.sha256
-          prerelease: false
-          make_latest: true
+        run: |
+          set -euo pipefail
+          files="geosite.dat geosite.dat.sha256 geoip.dat geoip.dat.sha256"
+          title="$(date +'%Y%m%d')"
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest $files --clobber
+            gh release edit latest --title "$title" --latest
+          else
+            gh release create latest $files --title "$title" --latest
+          fi

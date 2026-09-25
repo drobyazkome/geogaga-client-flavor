@@ -8,8 +8,8 @@
   "DomesticDNSType": "TCP",
   "DomesticDNSDomain": "",
   "DomesticDNSIP": "77.88.8.8",
-  "Geoipurl": "https://raw.githack.com/bratishkadrugoimamysynishka/geogaga-client-flavor/release/geoip.dat",
-  "Geositeurl": "https://raw.githack.com/bratishkadrugoimamysynishka/geogaga-client-flavor/release/geosite.dat",
+  "Geoipurl": "https://cache076.storage.yandexcloud.net/geoip.dat",
+  "Geositeurl": "https://cache076.storage.yandexcloud.net/geosite.dat",
   "LastUpdated": "1781888908",
   "DnsHosts": {
     "cloudflare-dns.com": "1.1.1.1",

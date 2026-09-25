@@ -44,8 +44,7 @@
       "rules": [
         {
           "src": [
-            "category-ads",
-            "geosite:win-spy"
+            "category-ads"
           ],
           "dst": "GEOGAGA-BLOCK"
         },
@@ -83,7 +82,7 @@
       ]
     },
     {
-      "url": "https://github.com/drobyazkome/geogaga-client-flavor/raw/main/custom-additions/geosite-block.lst",
+      "url": "custom-additions/geosite-block.lst",
       "rules": [
         {
           "src": [
@@ -94,7 +93,7 @@
       ]
     },
     {
-      "url": "https://github.com/drobyazkome/geogaga-client-flavor/raw/main/custom-additions/geosite-direct.lst",
+      "url": "custom-additions/geosite-direct.lst",
       "rules": [
         {
           "src": [
@@ -105,7 +104,7 @@
       ]
     },
     {
-      "url": "https://github.com/drobyazkome/geogaga-client-flavor/raw/main/custom-additions/geosite-proxy.lst",
+      "url": "custom-additions/geosite-proxy.lst",
       "rules": [
         {
           "src": [
@@ -277,7 +276,7 @@
       ]
     },
     {
-      "url": "https://github.com/drobyazkome/geogaga-client-flavor/raw/main/custom-additions/geoip-block.lst",
+      "url": "custom-additions/geoip-block.lst",
       "rules": [
         {
           "src": [
@@ -288,7 +287,7 @@
       ]
     },
     {
-      "url": "https://github.com/drobyazkome/geogaga-client-flavor/raw/main/custom-additions/geoip-direct.lst",
+      "url": "custom-additions/geoip-direct.lst",
       "rules": [
         {
           "src": [
@@ -299,7 +298,7 @@
       ]
     },
     {
-      "url": "https://github.com/drobyazkome/geogaga-client-flavor/raw/main/custom-additions/geoip-proxy.lst",
+      "url": "custom-additions/geoip-proxy.lst",
       "rules": [
         {
           "src": [

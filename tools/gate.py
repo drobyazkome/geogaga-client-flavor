@@ -21,6 +21,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 
 # Пороги — примерно 85% от факта на 2026-08-23 (DIRECT 1911 после слияния
@@ -82,6 +83,10 @@ def split_fields(buf):
         wire, field = key & 7, key >> 3
         if wire == 2:
             length, pos = read_varint(buf, pos)
+            # срез за концом буфера Python молча укорачивает: обрезанный файл
+            # проходил гейт с теми же категориями (ревью Codex 24.09.2026)
+            if pos + length > len(buf):
+                raise ValueError(f"поле {field}: длина {length}, осталось {len(buf) - pos} байт — файл обрезан")
             out.append((field, buf[pos:pos + length]))
             pos += length
         elif wire == 0:
@@ -92,8 +97,13 @@ def split_fields(buf):
     return out
 
 
+# Тип правила Domain в router.proto: Plain (ключевое слово) = 0 — в protobuf
+# не пишется, поле 1 отсутствует; Regex = 1; Domain (с поддоменами) = 2; Full = 3.
+PLAIN, REGEX, DOMAIN, FULL = 0, 1, 2, 3
+
+
 def parse_categories(blob, want_values):
-    """→ {категория: (число записей, {значения} | None)}."""
+    """→ {категория: (число записей, {(тип, значение)} | None)}."""
     result = {}
     for _, payload in split_fields(blob):
         name = None
@@ -105,25 +115,46 @@ def parse_categories(blob, want_values):
             elif field == 2 and isinstance(chunk, bytes):
                 count += 1
                 if want_values:
+                    typ, value = PLAIN, None
                     for sub_field, sub in split_fields(chunk):
-                        if sub_field == 2 and isinstance(sub, bytes):
+                        if sub_field == 1 and isinstance(sub, tuple):
+                            typ = sub[1]
+                        elif sub_field == 2 and isinstance(sub, bytes):
                             try:
-                                values.add(sub.decode())
+                                value = sub.decode()
                             except UnicodeDecodeError:
                                 pass
+                    if value is not None:
+                        values.add((typ, value))
         result[name] = (count, values)
     return result
 
 
-def covered(domain, values):
-    """Домен есть в категории сам или покрыт родителем.
+def covered(domain, entries):
+    """Домен совпадает с правилом категории так, как его совпадёт Xray.
 
     Сборщик geogaga схлопывает `full:app.avito.ru`, если в той же категории
     уже лежит `domain:avito.ru` — покрытие сохраняется, запись исчезает.
     Проверять точным совпадением значит ловить оптимизацию как поломку.
+    Но тип важен: `full:avito.ru` поддомен app.avito.ru не покрывает — до
+    25.09 гейт смотрел только на строку и такую потерю пропускал (ревью Codex).
     """
     parts = domain.split(".")
-    return any(".".join(parts[i:]) in values for i in range(len(parts)))
+    suffixes = {".".join(parts[i:]) for i in range(len(parts))}
+    for typ, value in entries:
+        if typ == FULL and value == domain:
+            return True
+        if typ == DOMAIN and value in suffixes:
+            return True
+        if typ == PLAIN and value and value in domain:
+            return True
+        if typ == REGEX:
+            try:
+                if re.search(value, domain):
+                    return True
+            except re.error:
+                pass
+    return False
 
 
 def check(kind, path, state, failures):
@@ -167,10 +198,13 @@ def check(kind, path, state, failures):
         # порядок правил в шаблоне. На 23.08 таких 17 — это состояние апстрима
         # (реклама из category-ads runetfreedom против whitelist roscomvpn),
         # валить на нём сборку нельзя. Порог ловит регресс масштаба категории.
-        direct = cats.get("GEOGAGA-DIRECT", (0, set()))[1] or set()
+        def plain_values(cat):
+            return {v for _, v in cats.get(cat, (0, set()))[1] or set()}
+
+        direct = plain_values("GEOGAGA-DIRECT")
         for other, limit in (("GEOGAGA-PROXY", MAX_CONFLICTS_PROXY),
                              ("GEOGAGA-BLOCK", MAX_CONFLICTS_BLOCK)):
-            overlap = direct & (cats.get(other, (0, set()))[1] or set())
+            overlap = direct & plain_values(other)
             if overlap:
                 print(f"  внимание: {len(overlap)} доменов сразу в DIRECT и {other}: "
                       f"{', '.join(sorted(overlap)[:8])}", file=sys.stderr)

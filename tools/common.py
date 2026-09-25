@@ -12,6 +12,28 @@ def log_to_review(message):
     with open("tools/review.log", "a", encoding="utf-8") as f:
         f.write(message + "\n")
 
+# Отказы, после которых результат неполон: недоступный или пустой источник,
+# пропавшая категория, RIPE не ответил. До 25.09.2026 они только писались в
+# review.log, а сборка выходила с кодом 0 и публиковала базы без части данных
+# (ревью Codex). builder.py и parser.py проверяют список перед записью.
+FAILURES = []
+
+def fail(message):
+    print(f"❌ {message}")
+    log_to_review(f"[ОТКАЗ] {message}")
+    FAILURES.append(message)
+
+def to_cidr_proto(value):
+    """CIDR или одиночный адрес (→ /32, /128) в router_pb2.CIDR; не адрес — None."""
+    try:
+        net = ipaddress.ip_network(value.strip(), strict=False)
+    except (ValueError, AttributeError):
+        return None
+    cidr_proto = router_pb2.CIDR()
+    cidr_proto.ip = net.network_address.packed
+    cidr_proto.prefix = net.prefixlen
+    return cidr_proto
+
 def get_item_key(item, attr_name):
     if attr_name == "domain":
         return (item.type, item.value)
@@ -49,9 +71,7 @@ def fetch_asn(asn):
                 time.sleep(backoff)
                 backoff *= 2
             else:
-                msg = f"Ошибка получения префиксов для AS{asn} после {max_retries} попыток: {e}"
-                print(f"❌ {msg}")
-                log_to_review(f"[ОШИБКА RIPE] {msg}")
+                fail(f"RIPE: префиксы AS{asn} не получены после {max_retries} попыток: {e}")
     return prefixes
 
 def fetch_asn_prefixes(all_asns):
@@ -72,17 +92,15 @@ def parse_json_source_geoip(data, allowed_cats_set):
         if prov_upper not in allowed_cats_set:
             continue
 
+        # Одиночный адрес без маски — /32 или /128, как в LST. До 25.09 брались
+        # только строки с «/», и 17 адресов resolved_ips.json выпадали молча.
         cidrs = info.get("cidrs", []) or info.get("ips", []) or []
         for c in cidrs:
-            if isinstance(c, str) and '/' in c:
-                try:
-                    net = ipaddress.ip_network(c.strip(), strict=False)
-                    cidr_proto = router_pb2.CIDR()
-                    cidr_proto.ip = net.network_address.packed
-                    cidr_proto.prefix = net.prefixlen
-                    provider_items.append((cidr_proto, prov_upper, None))
-                except Exception:
-                    continue
+            cidr_proto = to_cidr_proto(c) if isinstance(c, str) else None
+            if cidr_proto is None:
+                log_to_review(f"[JSON-IP] {provider}: не адрес и не CIDR — {c!r}")
+                continue
+            provider_items.append((cidr_proto, prov_upper, None))
 
         asns = info.get("asns", []) or []
         for asn in asns:
@@ -182,7 +200,7 @@ def parse_lst_source_geoip(data_str):
         all_cidrs.update(fetch_asn_prefixes(all_asns))
 
     proto_cidrs = []
-    for c_str in all_cidrs:
+    for c_str in sorted(all_cidrs):   # множество — порядок от hash seed
         try:
             net = ipaddress.ip_network(c_str, strict=False)
             cidr_proto = router_pb2.CIDR()
@@ -279,12 +297,15 @@ def optimize_domains(domains_list):
             continue
         final_fulls.add(f_val)
 
+    # Множества обходятся в порядке, зависящем от PYTHONHASHSEED: одинаковые
+    # правила давали разные байты и SHA256 от прогона к прогону — ложное
+    # «обновление» баз у клиентов (ревью Codex 25.09). Порядок — сортировкой.
     optimized = []
     optimized.extend(plains)
     optimized.extend(regexes)
-    for d_val in final_doms:
+    for d_val in sorted(final_doms):
         optimized.append(dom_map[d_val])
-    for f_val in final_fulls:
+    for f_val in sorted(final_fulls):
         optimized.append(full_map[f_val])
     optimized.extend(others)
     return optimized
