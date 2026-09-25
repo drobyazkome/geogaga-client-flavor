@@ -40,6 +40,12 @@ jobs:
       - name: Запуск сборщика
         run: python tools/builder.py config.json
 
+      # GEOGAGA-PROXY-RU — записи PROXY, пересекающиеся с direct-правилом
+      # шаблонов (tools/derive.py). До хэшей — они считаются по итоговому
+      # файлу; до гейта — гейт требует категорию и держит её коридор.
+      - name: Производные категории geosite
+        run: python tools/derive.py geosite.dat
+
       - name: Генерация хэшей SHA256
         run: |
           sha256sum geosite.dat > geosite.dat.sha256

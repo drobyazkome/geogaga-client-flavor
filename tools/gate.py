@@ -6,9 +6,11 @@
 меньшего объёма. Наш s3-sync.sh пушит по смене sha256 и такого не заметит —
 клиенты получат обрезанные правила и уедут в туннель мимо роутинга.
 
-Проверяет: наличие и непустоту категорий, пороги по числу записей, падение
-размера против прошлого удачного прогона, контрольные домены в нужных
-категориях. Состояние прошлого прогона — рядом с файлом, в .geo-gate-state.
+Проверяет: наличие и непустоту категорий, пороги по числу записей (у
+производной GEOGAGA-PROXY-RU и хвоста — и верхние), падение размера против
+прошлого удачного прогона, контрольные домены в нужных категориях и домены,
+которых в категории быть не должно. Состояние прошлого прогона — рядом с
+файлом, в .geo-gate-state.
 
 Использование:
     geo-gate.py --geosite output/geosite.dat --geoip output/geoip.dat
@@ -27,19 +29,34 @@ import sys
 # Пороги — примерно 85% от факта на 2026-08-23 (DIRECT 1911 после слияния
 # с vahellame, PROXY 74824, BLOCK 832; geoip DIRECT 57644, PROXY 28172).
 # Ниже порога — не деградация одного источника, а потеря целого апстрима.
+# GEOGAGA-PROXY-RU — производная (tools/derive.py форка, с 26.09.2026): записи
+# PROXY, пересекающиеся с DIRECT ∪ EPICGAMES ∪ RIOT; факт на 26.09 — 22168.
 MIN_ENTRIES = {
-    "geosite": {"GEOGAGA-DIRECT": 1600, "GEOGAGA-PROXY": 63000, "GEOGAGA-BLOCK": 700},
+    "geosite": {"GEOGAGA-DIRECT": 1600, "GEOGAGA-PROXY": 63000, "GEOGAGA-BLOCK": 700,
+                "GEOGAGA-PROXY-RU": 15000},
     "geoip": {"GEOGAGA-DIRECT": 48000, "GEOGAGA-PROXY": 23000},
 }
 
+# Верхняя граница производной: она раздувается, если поплыл фильтр — обвал
+# passthrough (21.09 хвост слипся в одну категорию, RIOT/EPICGAMES потянули
+# бы за собой пол-PROXY) или DIRECT, распухший чужим списком.
+MAX_ENTRIES = {"geosite": {"GEOGAGA-PROXY-RU": 35000}}
+
 # Контрольные домены: по одному на смысловую группу источников.
 # gosuslugi/alfa-bank — whitelist roscomvpn; app.avito.ru — донор vahellame;
-# youtube/rutracker — ru-blocked runetfreedom; doubleclick — category-ads.
+# youtube/rutracker — ru-blocked runetfreedom; doubleclick — category-ads;
+# kasparov/ej/tvrain — заблокированные .ru, пересечение PROXY с domain:ru.
 CANARIES = {
     "GEOGAGA-DIRECT": ["gosuslugi.ru", "alfa-bank.ru", "nalog.ru", "app.avito.ru", "api.samokat.ru"],
     "GEOGAGA-PROXY": ["youtube.com", "telegram.org", "rutracker.org"],
     "GEOGAGA-BLOCK": ["doubleclick.net"],
+    "GEOGAGA-PROXY-RU": ["kasparov.ru", "ej.ru", "tvrain.ru"],
 }
+
+# Чего в категории быть не должно. youtube.com и telegram.org лежат в PROXY,
+# но не в DIRECT: в PROXY-RU они значат, что фильтр derive.py перевернулся
+# или сломался и категория стала копией PROXY.
+ABSENT = {"GEOGAGA-PROXY-RU": ["youtube.com", "telegram.org"]}
 
 # Хвост roscomvpn (passthrough `*`→`*`): шаблоны подписки ссылаются на эти
 # категории явно, без них правило в клиенте мёртвое. Верхняя граница ловит
@@ -175,8 +192,12 @@ def check(kind, path, state, failures):
             failures.append(f"{kind}: нет категории {name}")
             continue
         count = cats[name][0]
+        maximum = MAX_ENTRIES.get(kind, {}).get(name)
         if count < minimum:
             failures.append(f"{kind}: {name} — {count} записей, порог {minimum}")
+        elif maximum is not None and count > maximum:
+            failures.append(f"{kind}: {name} — {count} записей, больше {maximum}: "
+                            "категория раздулась, фильтр поплыл")
 
     if kind == "geosite":
         for name, (low, high) in TAIL_ENTRIES.items():
@@ -192,6 +213,13 @@ def check(kind, path, state, failures):
             missing = [d for d in domains if not covered(d, values)]
             if missing:
                 failures.append(f"geosite: в {name} нет контрольных доменов: {', '.join(missing)}")
+
+        for name, domains in ABSENT.items():
+            values = cats.get(name, (0, set()))[1] or set()
+            present = [d for d in domains if covered(d, values)]
+            if present:
+                failures.append(f"geosite: в {name} домены, которых там быть не должно: "
+                                f"{', '.join(present)}")
 
         # Сборщик geogaga категории между собой НЕ дедуплицирует: домен из двух
         # источников с разным dst попадает в обе категории, и дальше всё решает
