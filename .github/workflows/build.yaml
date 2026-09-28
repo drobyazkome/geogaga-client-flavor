@@ -40,7 +40,12 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Установка зависимостей
-        run: pip install protobuf
+        run: pip install protobuf pyyaml
+
+      # Сломанный derive или гейт не должен дойти до публикации. Те же тесты
+      # идут на каждый пуш — workflow «0. Тесты derive и гейта» (test.yaml).
+      - name: Тесты derive и гейта
+        run: python tools/test_derive_gate.py -v
 
       - name: Компиляция Protobuf схемы
         run: protoc --python_out=. tools/router.proto
@@ -53,6 +58,13 @@ jobs:
       # файлу; до гейта — гейт требует категорию и держит её коридор.
       - name: Производные категории geosite
         run: python tools/derive.py geosite.dat
+
+      # Гейт держит размер категорий, эта проверка — маршрут: на базе, которая
+      # сейчас уйдёт в релиз, шаблон с PROXY-RU ведёт каждый домен (записи
+      # PROXY и фильтра, их www. и api.) туда же, куда с полной PROXY, а
+      # PROXY-RU в файле — ровно вывод derive.
+      - name: Маршруты PROXY-RU на собранной базе
+        run: GEOSITE=geosite.dat python tools/test_derive_gate.py -v RealBaseTest
 
       - name: Генерация хэшей SHA256
         run: |

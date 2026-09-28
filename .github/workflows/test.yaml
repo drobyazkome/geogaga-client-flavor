@@ -1,0 +1,48 @@
+name: 0. Тесты derive и гейта
+
+# tools/test_derive_gate.py — на пуш в main, который трогает tools/ или
+# workflow, на PR и руками. Пуш сборку не запускает (только расписание и
+# ручной запуск), поэтому до 28.09 правка derive.py или gate.py впервые
+# проверялась боевой сборкой. Сборка гоняет те же тесты ещё раз: перед
+# сборщиком и на своей свежей базе до публикации.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/**'
+      - '.github/workflows/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Клонирование репозитория
+        uses: actions/checkout@v4
+
+      - name: Настройка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # protobuf не нужен: тест разбирает базу сам (gate.split_fields);
+      # PyYAML — для проверки шагов build.yaml
+      - name: Установка зависимостей
+        run: pip install pyyaml
+
+      - name: Тесты derive, гейта и шагов build.yaml
+        run: python tools/test_derive_gate.py -v
+
+      # derive → гейт → маршрут на базе, которую сейчас раздаёт релиз. Провал
+      # test_file_category_is_derived здесь значит, что derive.py сменил вывод
+      # против опубликованного: до следующей сборки это ожидаемо, но должно
+      # быть намеренным.
+      - name: Сквозная проверка на опубликованном релизе
+        run: |
+          git fetch -q --depth=1 origin release
+          git show FETCH_HEAD:geosite.dat > "$RUNNER_TEMP/geosite.dat"
+          GEOSITE="$RUNNER_TEMP/geosite.dat" python tools/test_derive_gate.py -v RealBaseTest

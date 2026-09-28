@@ -24,13 +24,17 @@ direct-правилом, а в конце — catch-all → proxy. Значит,
     PROXY `domain:example.com` при DIRECT `keyword:api` — api.example.com
     совпадает с обоими (ревью Codex T, 28.09.2026: до того такие записи
     выпадали, и поддомен уходил в direct). Keyword встречается в поддомене
-    любой записи, regexp — тоже, пока dotless_whole() не докажет обратное;
-    regexp, который Python читает не так, как Go, не проверить и на самой
-    записи — тогда остаются и full:. Такой keyword или regexp оставляет все
-    domain:, PROXY-RU раздувается до PROXY, и гейт (верхний порог,
-    youtube.com) её не пускает: стоп публикации лучше тихо сменённого
-    маршрута. На 25.09 в фильтре один regexp — однословное имя, поддомену
-    он не совпадает, и эта ветка ничего не добавляет.
+    любой записи. Regexp доказывается двумя способами: однословный целиком
+    (`^…$` без точки, dotless_whole) не совпадёт ни с одним поддоменом;
+    привязанный к концу литеральным хвостом (`\\.ru$`, end_literal) — только
+    с поддоменами записей X, у которых «.X» и хвост — суффиксы один другого.
+    Недоказуемый regexp, как и keyword, оставляет все domain:; regexp,
+    который Python читает не так, как Go, не проверить и на самой записи —
+    тогда остаются и full:. PROXY-RU раздувается до PROXY, и гейт (верхний
+    порог, youtube.com) её не пускает: стоп публикации лучше тихо сменённого
+    маршрута. До второго способа (28.09) и `\\.ru$` в DIRECT останавливал
+    сборку. На 25.09 в фильтре один regexp — однословное имя, поддомену он
+    не совпадает, и эта ветка ничего не добавляет.
 Семантика совпадения — `covered()` из gate.py, та же, что в гейте (как у Xray).
 Записи копируются protobuf-сообщениями целиком, атрибуты не теряются.
 
@@ -112,6 +116,40 @@ def dotless_whole(pattern):
     if len(items) < 2 or not (_anchor(items[0], BEGIN) and _anchor(items[-1], END)):
         return False
     return not _eats_dot(items)
+
+
+def end_literal(pattern):
+    """Литеральный хвост, которым кончается любая строка, совпавшая с regexp.
+
+    `\\.ru$` → ".ru", `(^|\\.)vk\\.com$` → "vk.com". None — regexp не привязан к
+    концу строки целиком (`a$|b` — нет), перед концом не литерал или разбор не
+    удался. Хвост — в нижнем регистре: Xray сверяет домен в нижнем, а лишнее
+    совпадение только оставляет запись в PROXY-RU.
+    """
+    if opaque_regexp(pattern):
+        return None
+    try:
+        items = list(sre_parse.parse(pattern))
+    except Exception:  # приватный модуль re: любой отказ — доказательства нет
+        return None
+    if len(items) < 2 or not _anchor(items[-1], END):
+        return None
+    tail = []
+    for op, arg in reversed(items[:-1]):
+        if _name(op) != "LITERAL":
+            break
+        tail.append(chr(arg))
+    return "".join(reversed(tail)).lower() or None
+
+
+def subdomain_may_end_with(value, tail):
+    """Может ли поддомен записи domain:value — строка «….value» — кончаться на tail.
+
+    Конец поддомена — «.value», перед ним что угодно: хвост короче сходится,
+    только если он — конец «.value», длиннее — если «.value» — его конец.
+    """
+    dotted = "." + value
+    return dotted.endswith(tail) or tail.endswith(dotted)
 
 
 def _name(code):
@@ -214,17 +252,39 @@ def derive(site_list):
                     keep[i] = "накрывает запись фильтра"
 
     # Поддомены записей domain: против keyword и regexp фильтра (ревью Codex T,
-    # 28.09.2026): что может совпасть с поддоменом, оставляет все domain:,
-    # непрозрачный regexp — и full:. Каждое такое правило — строка в лог.
-    wide = [(t, v) for t, v in loose if t == PLAIN or not dotless_whole(v)]
+    # 28.09.2026). Недоказуемое правило (wide) оставляет все domain:,
+    # непрозрачный regexp — и full:; regexp с литеральным хвостом у конца
+    # (tails) — только записи, чей поддомен может так кончаться. Каждое такое
+    # правило — строка в лог.
+    wide, tails = [], []
+    for t, v in loose:
+        if t == PLAIN:
+            wide.append((t, v))
+        elif not dotless_whole(v):
+            tail = end_literal(v)
+            if tail is None:
+                wide.append((t, v))
+            else:
+                tails.append((v, tail))
     opaque = any(t == REGEX and opaque_regexp(v) for t, v in loose)
+    by_tail = collections.Counter()
     for i, d in enumerate(proxy):
-        if i not in keep and (opaque or wide and d.type == DOMAIN):
+        if i in keep:
+            continue
+        if opaque or wide and d.type == DOMAIN:
             keep[i] = "может совпасть с keyword/regexp фильтра"
+        elif d.type == DOMAIN:
+            hit = next((v for v, tail in tails if subdomain_may_end_with(d.value, tail)), None)
+            if hit is not None:
+                keep[i] = "поддомен может совпасть с regexp фильтра"
+                by_tail[hit] += 1
     for t, v in wide:
         print(f"derive: внимание — {'keyword' if t == PLAIN else 'regexp'}:{v} в фильтре "
               f"может совпасть с поддоменом любой записи domain:, в {TARGET} оставлены "
               "все; гейт раздутую категорию не пустит", file=sys.stderr)
+    for v, tail in tails:
+        print(f"derive: regexp:{v} в фильтре кончается на «{tail}» — оставлены записи domain:, "
+              f"чей поддомен может так кончаться: {by_tail[v]}", file=sys.stderr)
 
     reasons = collections.Counter(keep.values())
     return [proxy[i] for i in sorted(keep)], reasons

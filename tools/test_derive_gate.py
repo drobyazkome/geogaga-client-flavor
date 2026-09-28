@@ -17,6 +17,10 @@ domain:. Сквозная проверка на реальной базе — de
 Ни protoc, ни protobuf не нужны: базу разбирает gate.split_fields, как в
 гейте. Тест шагов workflow зовёт bash и берёт шаги из YAML — без PyYAML
 пропускается.
+
+В CI с 28.09: workflow «0. Тесты derive и гейта» (test.yaml) — на каждый пуш
+в tools/ и .github/, на опубликованном релизе; сборка (build.yaml) — перед
+сборщиком и RealBaseTest на своей свежей базе до публикации.
 """
 
 import contextlib
@@ -208,6 +212,38 @@ class DeriveTest(unittest.TestCase):
                          "EPICGAMES": [], "RIOT": []})
         self.assertEqual(ru, rules("domain:youtube.com", "full:telegram.org"))
 
+    def test_end_anchored_regexp_keeps_only_fitting_tails(self):
+        # до 28.09 любой regexp, кроме однословного, оставлял все domain:, и
+        # `\.ru$` в DIRECT раздувал PROXY-RU до PROXY — гейт вставал. Хвост у
+        # конца доказывает: поддомены other.com и youtube.com так не кончаются;
+        # domain:ru — сама «ru» без точки, но x.ru совпадает
+        ru = self.derive_and_route(
+            ["domain:example.com", "domain:other.com", "domain:youtube.com", "domain:ru"],
+            [r"regexp:\.ru$", r"regexp:^[a-z]+\.example\.com$"],
+            ["example.com", "www.example.com", "other.com", "www.other.com", "youtube.com",
+             "m.youtube.com", "ru", "x.ru", "a.b.ru"])
+        self.assertEqual(ru, rules("domain:example.com", "domain:ru"))
+
+    def test_tail_longer_than_entry(self):
+        # хвост «vk.com» длиннее «.com»: поддомен vk.com записи domain:com совпадает
+        ru = self.derive_and_route(
+            ["domain:com", "domain:vk.com", "domain:example.com"], [r"regexp:(^|\.)vk\.com$"],
+            ["com", "vk.com", "m.vk.com", "xvk.com", "example.com", "www.example.com"])
+        self.assertEqual(ru, rules("domain:com", "domain:vk.com"))
+
+    def test_tail_ignores_case(self):
+        # (?i): хвост сверяется в нижнем регистре, иначе x.ru ушёл бы в direct
+        ru = self.derive_and_route(["domain:ru", "domain:example.com"], [r"regexp:(?i)\.RU$"],
+                                   ["ru", "x.ru", "example.com", "www.example.com"])
+        self.assertEqual(ru, rules("domain:ru"))
+
+    def test_unprovable_tails(self):
+        # не привязан к концу целиком, перед концом не литерал — доказательства нет
+        for pattern in (r"\.ru$|^api\.", r"[a-z]$", r"^api\.", r"\.ru"):
+            self.assertIsNone(derive.end_literal(pattern), pattern)
+        self.assertEqual(derive.end_literal(r"(^|\.)vk\.com$"), "vk.com")
+        self.assertEqual(derive.end_literal(r"\.RU\Z"), ".ru")
+
     def test_wide_rule_is_reported(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
@@ -278,7 +314,10 @@ class WorkflowBaselineTest(unittest.TestCase):
             proc = subprocess.run(["bash", "-e", "-c", self.steps[name]], env=env,
                                   capture_output=True, text=True, timeout=60)
             state_path = os.path.join(tmp, "gate-state.json")
-            state = open(state_path).read() if os.path.exists(state_path) else None
+            state = None
+            if os.path.exists(state_path):
+                with open(state_path) as f:
+                    state = f.read()
         return proc, state
 
     def test_unread_release_fails_build(self):
@@ -347,6 +386,25 @@ class RealBaseTest(unittest.TestCase):
         ru, failures = self.publish(self.cats)
         self.assertEqual(failures, [])
         self.assertEqual(changed_routes(self.cats, ru, self.probes(self.cats))[:10], [])
+
+    def test_file_category_is_derived(self):
+        # в сборке — категория в только что собранном файле; на опубликованном
+        # релизе расхождение значит, что derive.py сменил вывод, — до следующей
+        # сборки это ожидаемо, но должно быть намеренным
+        if derive.TARGET not in self.cats:
+            self.skipTest(f"в базе нет {derive.TARGET}")
+        self.assertEqual(self.cats[derive.TARGET], run_derive(self.cats),
+                         f"{derive.TARGET} в файле ≠ derive по этому же файлу")
+
+    def test_end_anchored_regexp_in_direct_passes_gate(self):
+        # `\.ru$` в DIRECT: до 28.09 PROXY-RU раздувалась до PROXY и гейт вставал;
+        # теперь категория та же — поддомены на .ru и так под domain:ru фильтра
+        cats = dict(self.cats)
+        cats["GEOGAGA-DIRECT"] = cats["GEOGAGA-DIRECT"] + rules(r"regexp:\.ru$")
+        ru, failures = self.publish(cats)
+        self.assertEqual(failures, [])
+        self.assertEqual(len(ru), len(run_derive(self.cats)))
+        self.assertEqual(changed_routes(cats, ru, self.probes(cats))[:10], [])
 
     def test_keyword_in_direct_blocked_or_harmless(self):
         # сценарий Codex на живых данных: keyword:api в DIRECT
