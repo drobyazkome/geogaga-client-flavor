@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 0,6,12,18 * * *'
   workflow_dispatch:
+    inputs:
+      first_release:
+        description: 'Первая публикация: ветки release ещё нет, усадку сравнить не с чем'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -17,6 +22,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 'true' — только ручной запуск с галкой first_release; в плановом пусто.
+    env:
+      FIRST_RELEASE: ${{ inputs.first_release }}
     steps:
       - name: Клонирование репозитория
         uses: actions/checkout@v4
@@ -54,20 +62,36 @@ jobs:
       # Проверка усадки гейта сравнивает с прошлой сборкой, а раннер каждый раз
       # чистый: без этого шага .geo-gate-state не было, и усадка между
       # сборками не проверялась вовсе (ревью Codex 25.09). База — размеры
-      # опубликованной ветки release.
+      # опубликованной ветки release. Не прочиталась — сборка падает: до 28.09
+      # шаг только предупреждал, гейт шёл как первый запуск и пропускал усадку
+      # больше 20 % (ревью Codex T). Сети — три попытки. Первая публикация,
+      # когда release ещё нет, — ручной запуск с first_release.
       - name: Базовая линия гейта — размеры опубликованного релиза
         run: |
-          if git fetch -q --depth=1 origin release \
-             && gs=$(git cat-file -s FETCH_HEAD:geosite.dat) \
-             && gi=$(git cat-file -s FETCH_HEAD:geoip.dat); then
-            printf '{"geosite": {"size": %s}, "geoip": {"size": %s}}\n' "$gs" "$gi" > "$RUNNER_TEMP/gate-state.json"
-            echo "база: geosite $gs, geoip $gi байт"
+          for attempt in 1 2 3; do
+            if git fetch -q --depth=1 origin release \
+               && gs=$(git cat-file -s FETCH_HEAD:geosite.dat) \
+               && gi=$(git cat-file -s FETCH_HEAD:geoip.dat); then
+              printf '{"geosite": {"size": %s}, "geoip": {"size": %s}}\n' "$gs" "$gi" > "$RUNNER_TEMP/gate-state.json"
+              echo "база: geosite $gs, geoip $gi байт"
+              exit 0
+            fi
+            [ "$attempt" = 3 ] || sleep 10
+          done
+          if [ "$FIRST_RELEASE" = true ]; then
+            echo "::warning::первая публикация: ветка release не прочитана — усадка против прошлой сборки не проверяется"
           else
-            echo "::warning::ветка release не прочитана — усадка против прошлой сборки не проверяется"
+            echo "::error::ветка release не прочитана — без базовой линии усадку не проверить, сборка не публикуется; первая публикация — ручной запуск с first_release"
+            exit 1
           fi
 
+      # --require-state: без базовой линии гейт откажет и сам, даже если шаг
+      # выше снова начнёт глотать ошибку. В первой публикации флага нет.
       - name: Гейт качества geo-баз
-        run: python tools/gate.py --geosite geosite.dat --geoip geoip.dat --state "$RUNNER_TEMP/gate-state.json"
+        run: |
+          require=--require-state
+          if [ "$FIRST_RELEASE" = true ]; then require=; fi
+          python tools/gate.py --geosite geosite.dat --geoip geoip.dat --state "$RUNNER_TEMP/gate-state.json" $require
 
       - name: Подготовка файлов маршрутизации
         run: |

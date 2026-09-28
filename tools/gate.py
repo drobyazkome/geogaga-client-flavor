@@ -10,11 +10,15 @@
 производной GEOGAGA-PROXY-RU и хвоста — и верхние), падение размера против
 прошлого удачного прогона, контрольные домены в нужных категориях и домены,
 которых в категории быть не должно. Состояние прошлого прогона — рядом с
-файлом, в .geo-gate-state.
+файлом, в .geo-gate-state. Нет состояния — первый запуск, усадка не
+проверяется; с --require-state это отказ. Флаг ставит workflow форка: там
+состояние — размеры опубликованного релиза, и без них публиковать нельзя
+(ревью Codex T, 28.09.2026).
 
 Использование:
     geo-gate.py --geosite output/geosite.dat --geoip output/geoip.dat
     geo-gate.py --geosite ... --geoip ... --state /var/lib/geo-gate.json
+    geo-gate.py --geosite ... --geoip ... --state base.json --require-state
 
 Код возврата: 0 — можно публиковать, 1 — нельзя. Встраивать в s3-sync.sh
 ПЕРЕД PUT и в workflow форка ПЕРЕД публикацией релиза.
@@ -39,7 +43,10 @@ MIN_ENTRIES = {
 
 # Верхняя граница производной: она раздувается, если поплыл фильтр — обвал
 # passthrough (21.09 хвост слипся в одну категорию, RIOT/EPICGAMES потянули
-# бы за собой пол-PROXY) или DIRECT, распухший чужим списком.
+# бы за собой пол-PROXY) или DIRECT, распухший чужим списком. Или в
+# direct-правиле keyword/regexp, который может совпасть с поддоменом: derive.py
+# тогда оставляет все domain: (строка «внимание» в его логе), и в PROXY-RU
+# попадают и youtube.com с telegram.org из ABSENT.
 MAX_ENTRIES = {"geosite": {"GEOGAGA-PROXY-RU": 35000}}
 
 # Контрольные домены: по одному на смысловую группу источников.
@@ -257,6 +264,8 @@ def main():
     parser.add_argument("--geoip", required=True)
     parser.add_argument("--state", default=None,
                         help="файл состояния (по умолчанию .geo-gate-state рядом с geosite)")
+    parser.add_argument("--require-state", action="store_true",
+                        help="нет размера прошлой сборки в состоянии — отказ, а не первый запуск")
     args = parser.parse_args()
 
     state_path = args.state or os.path.join(os.path.dirname(os.path.abspath(args.geosite)),
@@ -267,6 +276,14 @@ def main():
         state = {}
 
     failures = []
+    # Без базовой линии усадку не с чем сравнить. В workflow форка это отказ
+    # чтения релиза, а не первый запуск: до 28.09 гейт тогда пропускал усадку
+    # больше 20 % (ревью Codex T).
+    if args.require_state:
+        for kind in ("geosite", "geoip"):
+            if not state.get(kind, {}).get("size"):
+                failures.append(f"{kind}: нет размера прошлой сборки в {state_path} — "
+                                "усадку не проверить")
     check("geosite", args.geosite, state, failures)
     check("geoip", args.geoip, state, failures)
 

@@ -19,8 +19,18 @@ direct-правилом, а в конце — catch-all → proxy. Значит,
     `domain:grani.ru` при `domain:ru` в DIRECT;
   * E накрывает запись фильтра (`covered(D, [E])`, обратное вложение):
     PROXY `domain:x.com` при DIRECT `full:api.x.com` — без него api.x.com
-    ушёл бы в direct, а сегодня уходит в proxy. Для keyword и regexp фильтра
-    обратного вложения нет: их значение не домен.
+    ушёл бы в direct, а сегодня уходит в proxy;
+  * E — domain:, а keyword или regexp фильтра может совпасть с её поддоменом:
+    PROXY `domain:example.com` при DIRECT `keyword:api` — api.example.com
+    совпадает с обоими (ревью Codex T, 28.09.2026: до того такие записи
+    выпадали, и поддомен уходил в direct). Keyword встречается в поддомене
+    любой записи, regexp — тоже, пока dotless_whole() не докажет обратное;
+    regexp, который Python читает не так, как Go, не проверить и на самой
+    записи — тогда остаются и full:. Такой keyword или regexp оставляет все
+    domain:, PROXY-RU раздувается до PROXY, и гейт (верхний порог,
+    youtube.com) её не пускает: стоп публикации лучше тихо сменённого
+    маршрута. На 25.09 в фильтре один regexp — однословное имя, поддомену
+    он не совпадает, и эта ветка ничего не добавляет.
 Семантика совпадения — `covered()` из gate.py, та же, что в гейте (как у Xray).
 Записи копируются protobuf-сообщениями целиком, атрибуты не теряются.
 
@@ -37,7 +47,13 @@ GEOGAGA-PROXY из базы не убирается никогда: база —
 import argparse
 import collections
 import os
+import re
 import sys
+
+try:
+    from re import _parser as sre_parse  # Python 3.11+
+except ImportError:
+    import sre_parse
 
 import router_pb2
 from gate import DOMAIN, FULL, PLAIN, REGEX, covered
@@ -53,6 +69,101 @@ FILTER = ("GEOGAGA-DIRECT", "EPICGAMES", "RIOT")
 def suffixes(domain):
     parts = domain.split(".")
     return [".".join(parts[i:]) for i in range(len(parts))]
+
+
+def opaque_regexp(pattern):
+    """Regexp, который Python не компилирует или читает не так, как Go.
+
+    Xray компилирует regexp на Go (RE2), а covered() и разбор ниже — Python.
+    POSIX-класс Go `[[:punct:]]` Python принимает за набор букв, `\\pL` не
+    знает вовсе: такой regexp не проверить ни на поддомене, ни на записи.
+    """
+    if "[:" in pattern:
+        return True
+    try:
+        re.compile(pattern)
+    except re.error:
+        return True
+    return False
+
+
+DOT = ord(".")
+BEGIN = {"AT_BEGINNING", "AT_BEGINNING_STRING"}
+END = {"AT_END", "AT_END_STRING"}
+# Классы без точки (\d \s \w) и их отрицания — с точкой; прочие неизвестны.
+DOTLESS_CLASSES = {"CATEGORY_DIGIT", "CATEGORY_SPACE", "CATEGORY_WORD"}
+DOTTED_CLASSES = {"CATEGORY_NOT_DIGIT", "CATEGORY_NOT_SPACE", "CATEGORY_NOT_WORD"}
+
+
+def dotless_whole(pattern):
+    """Regexp совпадает только со всей строкой (^…$), и точки в ней нет.
+
+    Такой поддомену не совпадёт никогда: в поддомене точка есть всегда. Так
+    устроен regexp direct-правила на 25.09 — `^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`.
+    Разбор — парсером модуля re; что здесь не разобрано (любой символ,
+    обратная ссылка, lookaround), считается «может поглотить точку».
+    """
+    if opaque_regexp(pattern):
+        return False
+    try:
+        items = list(sre_parse.parse(pattern))
+    except Exception:  # приватный модуль re: любой отказ — доказательства нет
+        return False
+    if len(items) < 2 or not (_anchor(items[0], BEGIN) and _anchor(items[-1], END)):
+        return False
+    return not _eats_dot(items)
+
+
+def _name(code):
+    return getattr(code, "name", None)
+
+
+def _anchor(item, names):
+    op, arg = item
+    return _name(op) == "AT" and _name(arg) in names
+
+
+def _eats_dot(items):
+    """Может ли кусок разобранного regexp поглотить «.»; незнакомое — может."""
+    for op, arg in items:
+        name = _name(op)
+        if name == "AT":
+            continue
+        if name == "LITERAL":
+            hit = arg == DOT
+        elif name == "NOT_LITERAL":
+            hit = arg != DOT
+        elif name == "IN":
+            hit = _class_has_dot(arg)
+        elif name in ("SUBPATTERN", "MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"):
+            hit = _eats_dot(arg[-1])
+        elif name == "ATOMIC_GROUP":
+            hit = _eats_dot(arg)
+        elif name == "BRANCH":
+            hit = any(_eats_dot(alt) for alt in arg[1])
+        else:
+            return True
+        if hit:
+            return True
+    return False
+
+
+def _class_has_dot(items):
+    """Есть ли «.» в классе [...]: литералы, диапазоны, \\d \\s \\w, отрицание."""
+    negate = has = False
+    for op, arg in items:
+        name = _name(op)
+        if name == "NEGATE":
+            negate = True
+        elif name == "LITERAL":
+            has = has or arg == DOT
+        elif name == "RANGE":
+            has = has or arg[0] <= DOT <= arg[1]
+        elif name == "CATEGORY" and _name(arg) in DOTLESS_CLASSES | DOTTED_CLASSES:
+            has = has or _name(arg) in DOTTED_CLASSES
+        else:
+            return True
+    return has != negate
 
 
 def derive(site_list):
@@ -101,6 +212,19 @@ def derive(site_list):
             for i in proxy_idx.get(s, ()):
                 if i not in keep and covered(value, [(proxy[i].type, proxy[i].value)]):
                     keep[i] = "накрывает запись фильтра"
+
+    # Поддомены записей domain: против keyword и regexp фильтра (ревью Codex T,
+    # 28.09.2026): что может совпасть с поддоменом, оставляет все domain:,
+    # непрозрачный regexp — и full:. Каждое такое правило — строка в лог.
+    wide = [(t, v) for t, v in loose if t == PLAIN or not dotless_whole(v)]
+    opaque = any(t == REGEX and opaque_regexp(v) for t, v in loose)
+    for i, d in enumerate(proxy):
+        if i not in keep and (opaque or wide and d.type == DOMAIN):
+            keep[i] = "может совпасть с keyword/regexp фильтра"
+    for t, v in wide:
+        print(f"derive: внимание — {'keyword' if t == PLAIN else 'regexp'}:{v} в фильтре "
+              f"может совпасть с поддоменом любой записи domain:, в {TARGET} оставлены "
+              "все; гейт раздутую категорию не пустит", file=sys.stderr)
 
     reasons = collections.Counter(keep.values())
     return [proxy[i] for i in sorted(keep)], reasons
