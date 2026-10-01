@@ -285,6 +285,54 @@ class GateStateTest(unittest.TestCase):
         self.assertIn("падение 100%", err)
 
 
+def cidr(ip, prefix):
+    """CIDR geoip: ip — байты адреса, prefix 0 в protobuf не пишется."""
+    return field(1, ip) + (varint(2 << 3) + varint(prefix) if prefix else b"")
+
+
+class GateGeoipTest(unittest.TestCase):
+    """gate.check("geoip"): записи CIDR разбираются, а не только считаются.
+    До 02.10 GEOGAGA-DIRECT/PROXY с нужными количествами и оборванным
+    protobuf каждой записи проходили гейт (ревью Codex F2)."""
+
+    GOOD = cidr(bytes([10, 0, 0, 0]), 24)
+
+    def check(self, bad=None):
+        """База с порогами впритык; bad — одна запись PROXY вместо годной."""
+        sizes = gate.MIN_ENTRIES["geoip"]
+        out = bytearray()
+        for name, count in sizes.items():
+            entries = [self.GOOD] * count
+            if bad is not None and name == "GEOGAGA-PROXY":
+                entries[count // 2] = bad
+            out += field(1, field(1, name.encode()) + b"".join(field(2, e) for e in entries))
+        failures = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "geoip.dat")
+            with open(path, "wb") as f:
+                f.write(out)
+            with contextlib.redirect_stderr(io.StringIO()):
+                gate.check("geoip", path, {}, failures)
+        return failures
+
+    def test_valid_base_passes(self):
+        self.assertEqual(self.check(), [])
+        self.assertEqual(self.check(cidr(bytes(16), 128)), [])
+        self.assertEqual(self.check(cidr(bytes(4), 0)), [])
+
+    def test_broken_cidr_fails(self):
+        for name, bad in (("оборванный protobuf", b"\xff"),
+                          ("адрес 5 байт", cidr(bytes(5), 24)),
+                          ("адреса нет", varint(2 << 3) + varint(24)),
+                          ("prefix 33 у IPv4", cidr(bytes(4), 33)),
+                          ("prefix 129 у IPv6", cidr(bytes(16), 129)),
+                          ("ip не байтами", varint(1 << 3) + varint(10))):
+            with self.subTest(name):
+                failures = self.check(bad)
+                self.assertEqual(len(failures), 1, failures)
+                self.assertIn("geoip: файл не разбирается", failures[0])
+
+
 @unittest.skipUnless(yaml, "нужен PyYAML")
 class WorkflowBaselineTest(unittest.TestCase):
     """Шаги build.yaml в bash -e, как их зовёт GitHub, с подставными git, sleep

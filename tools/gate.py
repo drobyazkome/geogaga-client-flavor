@@ -126,8 +126,34 @@ def split_fields(buf):
 PLAIN, REGEX, DOMAIN, FULL = 0, 1, 2, 3
 
 
-def parse_categories(blob, want_values):
-    """→ {категория: (число записей, {(тип, значение)} | None)}."""
+def check_cidr(chunk):
+    """Запись CIDR geoip (router.proto: bytes ip = 1; uint32 prefix = 2).
+
+    До 02.10 гейт CIDR только считал: база с нужными количествами и
+    оборванным protobuf каждой записи проходила (ревью Codex F2). Битая
+    запись — ValueError: публиковать такую базу нельзя целиком.
+    """
+    ip, prefix = None, 0
+    for field, value in split_fields(chunk):
+        if field == 1:
+            if not isinstance(value, bytes):
+                raise ValueError("CIDR: адрес не байтами")
+            ip = value
+        elif field == 2:
+            if not isinstance(value, tuple):
+                raise ValueError("CIDR: prefix не числом")
+            prefix = value[1]
+    if ip is None or len(ip) not in (4, 16):
+        raise ValueError(f"CIDR: адрес {'нет' if ip is None else f'{len(ip)} байт'}, нужно 4 или 16")
+    if prefix > 8 * len(ip):
+        raise ValueError(f"CIDR: prefix {prefix} у адреса {len(ip)} байт")
+
+
+def parse_categories(blob, want_values, cidrs=False):
+    """→ {категория: (число записей, {(тип, значение)} | None)}.
+
+    cidrs — записи категории это CIDR geoip, каждая проверяется check_cidr.
+    """
     result = {}
     for _, payload in split_fields(blob):
         name = None
@@ -138,6 +164,8 @@ def parse_categories(blob, want_values):
                 name = chunk.decode()
             elif field == 2 and isinstance(chunk, bytes):
                 count += 1
+                if cidrs:
+                    check_cidr(chunk)
                 if want_values:
                     typ, value = PLAIN, None
                     for sub_field, sub in split_fields(chunk):
@@ -189,7 +217,7 @@ def check(kind, path, state, failures):
     size = len(blob)
 
     try:
-        cats = parse_categories(blob, want_values=(kind == "geosite"))
+        cats = parse_categories(blob, want_values=(kind == "geosite"), cidrs=(kind == "geoip"))
     except (ValueError, IndexError) as exc:
         failures.append(f"{kind}: файл не разбирается ({exc})")
         return
