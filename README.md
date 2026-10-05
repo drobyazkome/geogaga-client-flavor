@@ -151,6 +151,9 @@
   * Из репозитория *hydraponique/roscomvpn-geosite*:
     * `category-geoblock-ru` — доменные имена зарубежных ресурсов, заблокировавших доступ для пользователей из РФ.
     * `twitch-ads` — домены рекламной сети Twitch.
+  * Из *community.antifilter.download* (`list/domains.lst`, живой список сообщества Antifilter, с 05.10.2026):
+    * `*` — заблокированные в РФ домены. Взят как живой донор: `ru-blocked` runetfreedom
+      не обновляется с августа 2026, geosite roscomvpn — с апреля, re:filter — с 01.08.
   * Из локального репозитория *custom-additions/geosite-proxy.lst*:
     * `*` — персональные доменные имена для маршрутизации через VPN.
 

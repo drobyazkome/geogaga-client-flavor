@@ -104,6 +104,17 @@
       ]
     },
     {
+      "url": "https://community.antifilter.download/list/domains.lst",
+      "rules": [
+        {
+          "src": [
+            "*"
+          ],
+          "dst": "GEOGAGA-PROXY"
+        }
+      ]
+    },
+    {
       "url": "custom-additions/geosite-proxy.lst",
       "rules": [
         {
