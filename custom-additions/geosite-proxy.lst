@@ -15,3 +15,14 @@ domain:muscache.com
 
 # Comss - сайт и сервисы
 domain:comss.ru
+
+# Заблокированные в РФ .ru/.su, которых нет у доноров PROXY (itdoginfo inside-raw, сверка 05.10.2026):
+# в базе лежали только в DIRECT и уходили напрямую, в блокировку оператора
+domain:grani.ru
+domain:moscowtimes.ru
+domain:fn-volga.ru
+domain:anime-portal.su
+domain:anistars.ru
+domain:doramalive.ru
+domain:scryde.ru
+domain:sklatchiki.ru
