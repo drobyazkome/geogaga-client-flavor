@@ -15,6 +15,12 @@
 состояние — размеры опубликованного релиза, и без них публиковать нельзя
 (ревью Codex T, 28.09.2026).
 
+Разбор protobuf строгий (хвост ревью 24.09, сделан 11.10.2026): varint не
+длиннее 10 байт, длина поля в пределах буфера, неизвестный wire type — ошибка,
+файл разбирается до последнего байта, ноль категорий — ошибка. Тем же
+разбором пользуются geo-merge.py, geo-combine.py, geo-coverage.py,
+normal-direct-candidates.py, templates-build.py и subscription-contract.sh.
+
 Использование:
     geo-gate.py --geosite output/geosite.dat --geoip output/geoip.dat
     geo-gate.py --geosite ... --geoip ... --state /var/lib/geo-gate.json
@@ -22,6 +28,10 @@
 
 Код возврата: 0 — можно публиковать, 1 — нельзя. Встраивать в s3-sync.sh
 ПЕРЕД PUT и в workflow форка ПЕРЕД публикацией релиза.
+
+Копии — tools/gate.py форка geogaga-client-flavor и
+/opt/remnawave-geo-updater/gate.py на панели — байт в байт с этим файлом;
+правится здесь, копии — после.
 """
 
 import argparse
@@ -89,22 +99,43 @@ MAX_CONFLICTS_BLOCK = 400
 
 
 def read_varint(buf, pos):
-    value = shift = 0
-    while True:
+    """Varint protobuf → (число, позиция за ним), строго.
+
+    Не длиннее 10 байт и не больше 64 бит; за концом буфера — «файл обрезан».
+    До 11.10 цикл шёл до первого байта без старшего бита: за концом буфера
+    падал IndexError без причины, а 0xFF любой длины давал число любой
+    величины (хвост ревью 24.09).
+    """
+    value = 0
+    for i in range(10):
+        if pos >= len(buf):
+            raise ValueError("varint оборван — файл обрезан")
         byte = buf[pos]
         pos += 1
-        value |= (byte & 0x7F) << shift
-        shift += 7
+        value |= (byte & 0x7F) << (7 * i)
         if not byte & 0x80:
+            if value >> 64:
+                raise ValueError("varint больше 64 бит")
             return value, pos
+    raise ValueError("varint длиннее 10 байт")
 
 
 def split_fields(buf):
+    """Один уровень сообщения → [(поле, байты | ("varint", число))], строго.
+
+    Разбор идёт до последнего байта. В router.proto только wire type 0 и 2:
+    остальные (1, 5 — fixed, 3, 4 — группы) — ошибка, а не пропуск. Поле 0 и
+    номер больше 2^29−1 protobuf не допускает — это не база.
+    """
     pos = 0
     out = []
     while pos < len(buf):
         key, pos = read_varint(buf, pos)
         wire, field = key & 7, key >> 3
+        if wire not in (0, 2):
+            raise ValueError(f"неподдерживаемый wire type {wire}")
+        if not 0 < field < 1 << 29:
+            raise ValueError(f"номер поля {field} вне 1…2^29−1")
         if wire == 2:
             length, pos = read_varint(buf, pos)
             # срез за концом буфера Python молча укорачивает: обрезанный файл
@@ -113,17 +144,88 @@ def split_fields(buf):
                 raise ValueError(f"поле {field}: длина {length}, осталось {len(buf) - pos} байт — файл обрезан")
             out.append((field, buf[pos:pos + length]))
             pos += length
-        elif wire == 0:
+        else:
             value, pos = read_varint(buf, pos)
             out.append((field, ("varint", value)))
-        else:
-            raise ValueError(f"неподдерживаемый wire type {wire}")
     return out
+
+
+def check_message(chunk):
+    """Запись без схемы: только то, что она разбирается до последнего байта."""
+    split_fields(chunk)
 
 
 # Тип правила Domain в router.proto: Plain (ключевое слово) = 0 — в protobuf
 # не пишется, поле 1 отсутствует; Regex = 1; Domain (с поддоменами) = 2; Full = 3.
 PLAIN, REGEX, DOMAIN, FULL = 0, 1, 2, 3
+
+
+def parse_domain(chunk):
+    """Запись Domain geosite (router.proto: Type type = 1; string value = 2;
+    repeated Attribute attribute = 3) → (тип, значение), строго.
+
+    Тип — число 0–3: другой Xray не загрузит. Значение — непустая строка UTF-8:
+    пустое ключевое слово совпало бы с любым доменом. До 11.10 запись без
+    значения или с битым UTF-8 молча выпадала из проверки контрольных доменов,
+    но входила в счёт записей.
+    """
+    typ, value = PLAIN, None
+    for field, sub in split_fields(chunk):
+        if field == 1:
+            if not isinstance(sub, tuple):
+                raise ValueError("Domain: тип не числом")
+            typ = sub[1]
+        elif field == 2:
+            if not isinstance(sub, bytes):
+                raise ValueError("Domain: значение не строкой")
+            value = sub.decode()
+        elif field == 3:
+            if not isinstance(sub, bytes):
+                raise ValueError("Domain: атрибут не сообщением")
+            check_message(sub)
+    if typ not in (PLAIN, REGEX, DOMAIN, FULL):
+        raise ValueError(f"Domain: тип {typ}, бывает 0–3")
+    if not value:
+        raise ValueError("Domain: нет значения")
+    return typ, value
+
+
+def iter_categories(blob, entry=check_message):
+    """GeoSiteList или GeoIPList → [(имя, [entry(запись) …], байты категории)].
+
+    Верхний уровень — только поле 1 сообщением: хвост мусора, который
+    разобрался как число или чужое поле, — ошибка, а не лишняя запись. Имя у
+    категории одно, непустое и не повторяется. Каждая запись (поле 2) идёт
+    через entry и разбирается целиком. Ни одной категории — ошибка: это пустой
+    ответ вместо базы. Пустая категория — не ошибка: GEOGAGA-BLOCK в geoip
+    пуст штатно; обязательные категории и их пороги — MIN_ENTRIES, TAIL_ENTRIES.
+    """
+    out = []
+    seen = set()
+    for field, payload in split_fields(blob):
+        if field != 1 or not isinstance(payload, bytes):
+            raise ValueError(f"верхний уровень: поле {field} — ждали категорию (поле 1, сообщение)")
+        name, items = None, []
+        for sub_field, chunk in split_fields(payload):
+            if sub_field == 1:
+                if not isinstance(chunk, bytes):
+                    raise ValueError("имя категории не строкой")
+                if name is not None:
+                    raise ValueError(f"у категории {name} второе имя")
+                name = chunk.decode()
+            elif sub_field == 2:
+                if not isinstance(chunk, bytes):
+                    raise ValueError(f"категория {name}: запись не сообщением")
+                items.append(entry(chunk))
+        if not name:
+            raise ValueError(f"категория без имени ({len(items)} записей)")
+        if name in seen:
+            raise ValueError(f"категория {name} в файле дважды")
+        seen.add(name)
+        out.append((name, items, payload))
+    if not out:
+        raise ValueError("ни одной категории — пустой файл или не база")
+    return out
 
 
 def check_cidr(chunk):
@@ -152,34 +254,18 @@ def check_cidr(chunk):
 def parse_categories(blob, want_values, cidrs=False):
     """→ {категория: (число записей, {(тип, значение)} | None)}.
 
-    cidrs — записи категории это CIDR geoip, каждая проверяется check_cidr.
+    Каждая запись разбирается целиком: cidrs — как CIDR geoip (check_cidr,
+    значений нет), want_values — как Domain geosite (parse_domain), иначе —
+    как сообщение без схемы. Битая запись — ValueError на всю базу.
     """
-    result = {}
-    for _, payload in split_fields(blob):
-        name = None
-        count = 0
-        values = set() if want_values else None
-        for field, chunk in split_fields(payload):
-            if field == 1 and isinstance(chunk, bytes) and name is None:
-                name = chunk.decode()
-            elif field == 2 and isinstance(chunk, bytes):
-                count += 1
-                if cidrs:
-                    check_cidr(chunk)
-                if want_values:
-                    typ, value = PLAIN, None
-                    for sub_field, sub in split_fields(chunk):
-                        if sub_field == 1 and isinstance(sub, tuple):
-                            typ = sub[1]
-                        elif sub_field == 2 and isinstance(sub, bytes):
-                            try:
-                                value = sub.decode()
-                            except UnicodeDecodeError:
-                                pass
-                    if value is not None:
-                        values.add((typ, value))
-        result[name] = (count, values)
-    return result
+    if cidrs:
+        entry = check_cidr
+    elif want_values:
+        entry = parse_domain
+    else:
+        entry = check_message
+    return {name: (len(items), set(items) if entry is parse_domain else None)
+            for name, items, _ in iter_categories(blob, entry)}
 
 
 def covered(domain, entries):
@@ -215,6 +301,13 @@ def check(kind, path, state, failures):
         return
     blob = open(path, "rb").read()
     size = len(blob)
+
+    # Усадка — до разбора: её видно и на файле, который не разобрался (пустой
+    # ответ вместо базы — «падение 100%», на это опираются тесты форка).
+    previous = state.get(kind, {}).get("size")
+    if previous and size < previous * (1 - MAX_SHRINK):
+        failures.append(f"{kind}: размер {size} против {previous} в прошлый раз "
+                        f"(падение {100 * (1 - size / previous):.0f}%)")
 
     try:
         cats = parse_categories(blob, want_values=(kind == "geosite"), cidrs=(kind == "geoip"))
@@ -274,11 +367,6 @@ def check(kind, path, state, failures):
             if len(overlap) > limit:
                 failures.append(f"geosite: {len(overlap)} доменов сразу в DIRECT и {other}, "
                                 f"порог {limit} — источник поехал")
-
-    previous = state.get(kind, {}).get("size")
-    if previous and size < previous * (1 - MAX_SHRINK):
-        failures.append(f"{kind}: размер {size} против {previous} в прошлый раз "
-                        f"(падение {100 * (1 - size / previous):.0f}%)")
 
     state.setdefault(kind, {})["size"] = size
     print(f"{kind}: {size} байт, " + ", ".join(f"{n}={c}" for n, (c, _) in cats.items()),
