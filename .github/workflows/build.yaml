@@ -143,8 +143,14 @@ jobs:
           [ -f tools/review.log ] && mv tools/review.log review.log || true
           echo "[$(date -u +'%Y-%m-%d %H:%M:%S')] ОШИБКА: Сбой выполнения шагов сборки в GitHub Actions" >> review.log
 
+      # Лог сборки — не результат: его отказ не должен останавливать релиз.
+      # 16.11.2026 пуш сюда получил разовый 403 от GitHub, шаги релиза не
+      # запустились, и панель 12 ч сидела без сборки, пока не сработал резерв.
+      # Коммит здесь фактически пустой (`git add tools.log` — путь из апстрима,
+      # такого файла нет), но пуш идёт каждый прогон и тоже может упасть.
       - name: Коммит и пуш лога в ветку main
         if: github.ref_name == 'main'
+        continue-on-error: true
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
